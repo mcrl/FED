@@ -8,5 +8,5 @@
 #define MAX_BUCKET 100000 // MAX_BUCKET * MAX_BUCKET < GPU memory
 #define NUM_KEY 10240 //MAX_BUCKET * NUM_KEY >> total line (=MAX_LINE * file_num)
 #define C 2048  // Total file size / NUM_KEY * C * (num_process per node) < CPU memory
-void set_param(const int num_file);
-void get_param(int &_num_key, int &_max_bucket, int &_c);  
+void set_param(const int num_file, int num_hash);
+void get_param(int &_num_key, int &_max_bucket, int &_c, int &_file_offload);  

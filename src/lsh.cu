@@ -28,13 +28,14 @@ static int b = 16;                   // Number of bands
 static int num_file;                // Number of files
 static int th;                      // Similarity threshold
 static int max_bucket, num_key, buf_c;  // Bucket and key-related variables
+static int file_offload;
 
 // Hashing and CUDA memory related variables
 static unsigned int *p, *q, *r;
 static unsigned int *_p, *_q, *_r;
 static int *bias_cuda;
 static char *buf_cuda;
-static unsigned int *hash_result;
+static unsigned int *hash_result, *total_hash_result;
 static unsigned int *hash_result_cuda;
 static unsigned int *buf[C], *cuda_buf1;
 static int *file_idx[C], *line_idx[C];
@@ -86,7 +87,6 @@ void init_lsh_cuda(int _num_hash, int _len_shingle, int _b, int seed, double _th
             r[i] = (r[i]*p[i])%q[i];
         }
     }
-    hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b));
 
     gpuErrchk(cudaMalloc((void**)&_p, sizeof(unsigned int) * num_hash));
     gpuErrchk(cudaMalloc((void**)&_q, sizeof(unsigned int) * num_hash));
@@ -101,9 +101,16 @@ void init_lsh_cuda(int _num_hash, int _len_shingle, int _b, int seed, double _th
     gpuErrchk(cudaMalloc(&buf_cuda, 3e9));
 
     MPI_Barrier(MPI_COMM_WORLD);
-    set_param(num_file);
-    get_param(num_key, max_bucket, buf_c);
+    set_param(num_file,num_hash+b);
+    get_param(num_key, max_bucket, buf_c, file_offload);
     MPI_Barrier(MPI_COMM_WORLD);
+
+    
+    hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b));
+    if(!file_offload) {
+        total_hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b) * num_file);
+    }
+
 
     for(int i=0; i<buf_c; i++) {
         buf[i]=(unsigned int*)malloc(sizeof(unsigned int) * num_hash * max_bucket);
@@ -125,6 +132,7 @@ void init_lsh_cuda(int _num_hash, int _len_shingle, int _b, int seed, double _th
     par=(int*)malloc(sizeof(int)*MAX_LINE*num_file);
     par_new=(int*)malloc(sizeof(int)*MAX_LINE*num_file);
 
+    
 }
 
 static double cmp_time1=0, cmp_time2=0, cmp_time3=0, cmp_time4=0, cmp_time5=0;
@@ -193,7 +201,7 @@ double get_total_file_write_time_lsh() {return file_write_time;}
 static long long total_comm;
 
 // Function to perform LSH (Locality Sensitive Hashing) and write results to a binary file
-void lsh_cuda(const std::string& filepath, const std::string& outputPath, int &_num_line) {
+void lsh_cuda(const std::string& filepath, const std::string& outputPath, int &_num_line, int file_idx) {
     int *bias;
     char *buf;
     int num_line;
@@ -229,31 +237,34 @@ void lsh_cuda(const std::string& filepath, const std::string& outputPath, int &_
     gpuErrchk(cudaGetLastError());
     time2 = std::chrono::high_resolution_clock::now();
 
-    // Copy results back to host memory
-    gpuErrchk(cudaMemcpy(hash_result, hash_result_cuda, sizeof(unsigned int)*num_line*(num_hash+b), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaGetLastError());
-
-    cudaDeviceSynchronize();
-    gpuErrchk(cudaGetLastError());
     auto time3 = std::chrono::high_resolution_clock::now();
+    if(file_offload) {
+        // Copy results back to host memory
+        gpuErrchk(cudaMemcpy(hash_result, hash_result_cuda, sizeof(unsigned int)*num_line*(num_hash+b), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaGetLastError());
 
-    // Construct output file path
-    std::filesystem::path inputPath(filepath);
-    std::string filename = inputPath.stem().string();
-    std::string newFilename = filename + "_hashresult.bin";
-    
-    std::filesystem::path outputDir(outputPath);
-    std::filesystem::path outputFilePath = outputDir / newFilename;
-    
-    // Write hash results to binary file
-    std::ofstream outFile(outputFilePath, std::ios::binary);
-    if (!outFile) {
-        std::cerr << "Error opening file for writing: " << outputFilePath << std::endl;
-        return;
+        cudaDeviceSynchronize();
+        gpuErrchk(cudaGetLastError());
+
+        // Construct output file path
+        std::filesystem::path inputPath(filepath);
+        std::string filename = inputPath.stem().string();
+        std::string newFilename = filename + "_hashresult.bin";
+        
+        std::filesystem::path outputDir(outputPath);
+        std::filesystem::path outputFilePath = outputDir / newFilename;
+        
+        // Write hash results to binary file
+        std::ofstream outFile(outputFilePath, std::ios::binary);
+        if (!outFile) {
+            std::cerr << "Error opening file for writing: " << outputFilePath << std::endl;
+            return;
+        }
+        outFile.write(reinterpret_cast<const char*>(hash_result), sizeof(unsigned int)*num_line*(num_hash+b));
+        outFile.close();
+    } else {
+        gpuErrchk(cudaMemcpy(total_hash_result+MAX_LINE*(num_hash+b)*file_idx, hash_result_cuda, sizeof(unsigned int)*num_line*(num_hash+b), cudaMemcpyDeviceToHost));
     }
-    outFile.write(reinterpret_cast<const char*>(hash_result), sizeof(unsigned int)*num_line*(num_hash+b));
-    outFile.close();
-    
     auto time4 = std::chrono::high_resolution_clock::now();
     
     // Accumulate computation times
@@ -475,33 +486,35 @@ void compare_lsh_cuda(const vector<string> &file_list, const std::string& output
 
             // Loop through each file in the file list
             for(int i=0; i<num_file; i++) {
-                std::string filepath = file_list[i];   // Get the file path
                 int fs = file_size[i];                // The number of documents in the file
+                if(file_offload) {
+                    std::string filepath = file_list[i];   // Get the file path
 
-                // Prepare the path to the hash result binary file
-                std::filesystem::path inputPath(filepath);
-                std::string filename = inputPath.stem().string();
-                std::string newFilename = filename + "_hashresult.bin";
-                std::filesystem::path outputDir(outputPath);
-                std::filesystem::path outputFilePath = outputDir / newFilename;
+                    // Prepare the path to the hash result binary file
+                    std::filesystem::path inputPath(filepath);
+                    std::string filename = inputPath.stem().string();
+                    std::string newFilename = filename + "_hashresult.bin";
+                    std::filesystem::path outputDir(outputPath);
+                    std::filesystem::path outputFilePath = outputDir / newFilename;
 
-                // Open the hash result file for reading
-                std::ifstream inFile(outputFilePath, std::ios::binary);
-                if (!inFile) {
-                    std::cerr << "Error opening file for reading: " << outputFilePath << std::endl;
-                    return;
+                    // Open the hash result file for reading
+                    std::ifstream inFile(outputFilePath, std::ios::binary);
+                    if (!inFile) {
+                        std::cerr << "Error opening file for reading: " << outputFilePath << std::endl;
+                        return;
+                    }
+                    // Read the hash results into memory
+                    inFile.read(reinterpret_cast<char*>(hash_result), sizeof(unsigned int) * fs * (num_hash+b));
+                    inFile.close();
+                } else {
+                    hash_result=total_hash_result+MAX_LINE*(num_hash+b)*i;
                 }
-                // Read the hash results into memory
-                inFile.read(reinterpret_cast<char*>(hash_result), sizeof(unsigned int) * fs * (num_hash+b));
-                inFile.close();
-
                 // Organize hash results into buckets based on the key
                 for(int j=0; j<fs; j++) {
                     auto tmp = *(hash_result + (unsigned long long)j*(num_hash+b) + num_hash + b_id) - key;
                     if(tmp < C) {
                         // Copy hash results for the current bucket into the buffer
                         memcpy(buf[tmp]+cnt[tmp]*num_hash, hash_result+(unsigned long long)j*(num_hash+b), sizeof(unsigned int)*num_hash);
-                        if(cnt[tmp]>=max_bucket) {cnt[tmp]++; continue;}
                         file_idx[tmp][cnt[tmp]] = i;
                         line_idx[tmp][cnt[tmp]] = j;
                         cnt[tmp]++;

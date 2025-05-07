@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cstdlib>  // getenv
+#include <sys/sysinfo.h>
 #include "mpi.h"
 
 #include "param.h"
@@ -13,8 +14,9 @@ using namespace std;
 static int num_key=NUM_KEY;;
 static int max_bucket=MAX_BUCKET;
 static int c=C;
+static int file_offload=true;
 
-void set_param(const int num_file) {
+void set_param(const int num_file, int num_hash) {
 
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank); 
@@ -39,23 +41,45 @@ void set_param(const int num_file) {
 
      // Compute the maximum bucket size based on available GPU memory
     max_bucket=sqrt(free_mem*0.9/ ((local_size-1)/deviceCount+1));
-    
 
-     // Calculate the number of keys based on file size and bucket size
+
+    // Check CPU memory and decide to use file offload
+    struct sysinfo info;
+    if (sysinfo(&info) != 0) {
+        perror("sysinfo");
+        printf("sysinfo error\n");
+    }
+
+    long cpu_free_mem = info.freeram * info.mem_unit;
+    long cpu_required = sizeof(unsigned int) * num_file*MAX_LINE*num_hash*local_size;
+    if(!rank) {
+        printf("CPU Free memory: %.2f GB\n", cpu_free_mem / 1024.0 / 1024.0 / 1024.0);
+        printf("  minimum required memory: %.2f GB\n", cpu_required / 1024.0 / 1024.0 / 1024.0);
+    }
+
+    if(cpu_free_mem > 10 * cpu_required) {
+        file_offload=false;
+        if(!rank) printf("  File offload: False\n");
+    } else {
+        file_offload=true;
+        if(!rank) printf("  File offload: True\n");
+    }
+
+    // Calculate the number of keys based on file size and bucket size
     num_key = max(2*num_file*MAX_LINE / max_bucket, int(std::pow(num_file*MAX_LINE, 1.0/2)*2));
-    
 
+    // The number of keys to process simultaneously. It is adjusted based on CPU memory, with a default setting of 1024.
+    c=C;
+    
     if (rank == 0) {
         std::cout  << "\n( The number of processes per node : " << local_size << ", The number of gpus per node: " << deviceCount << ")\n";
         std::cout  << "( max_bucket : " << max_bucket <<  ", num_key : " << num_key << ")\n" << std::endl;
     }
-
-    // The number of keys to process simultaneously. It is adjusted based on CPU memory, with a default setting of 1024.
-    c=C;
 }
 
-void get_param(int &_num_key, int &_max_bucket, int &_c) {
+void get_param(int &_num_key, int &_max_bucket, int &_c, int &_file_offload) {
     _num_key=num_key;
     _max_bucket=max_bucket;
     _c=c;
+    _file_offload=file_offload;
 }

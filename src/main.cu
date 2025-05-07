@@ -17,7 +17,6 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank); // Get rank of the process
     MPI_Comm_size(MPI_COMM_WORLD, &size); // Get total number of processes
 
-
     int deviceCount = 0;
     cudaError_t cuda_status = cudaGetDeviceCount(&deviceCount); // Get number of GPUs
     if (cuda_status != cudaSuccess) {return 1;}
@@ -59,7 +58,7 @@ int main(int argc, char* argv[]) {
     auto time1 = std::chrono::high_resolution_clock::now();
     for (int i=start_index; i < end_index; i++) {
         const string &fp=file_list[i];
-        lsh_cuda(fp, outputPath, file_size[i]);
+        lsh_cuda(fp, outputPath, file_size[i], i);
     }
 
     // Gather file sizes from all processes
