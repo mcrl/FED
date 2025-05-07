@@ -81,6 +81,9 @@ int main(int argc, char* argv[]) {
     if (rank == 0) {
         std::cout << "Start Comparison.." << std::endl;
     }
+    
+    AllgatherHashResult(rank,size);
+    
     time1 = std::chrono::high_resolution_clock::now();
     compare_lsh_cuda(file_list, outputPath, num_file, file_size, rank, size);
     MPI_Barrier(MPI_COMM_WORLD);

@@ -68,6 +68,9 @@ void merge(int x, int y) {
 
 // Initialize LSH-related CUDA structures
 void init_lsh_cuda(int _num_hash, int _len_shingle, int _b, int seed, double _th, int _num_file) {
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank); // Get rank of the process
+    MPI_Comm_size(MPI_COMM_WORLD, &size); // Get total number of processes
     num_hash=_num_hash;
     len_shingle=_len_shingle;
     b=_b;
@@ -105,12 +108,10 @@ void init_lsh_cuda(int _num_hash, int _len_shingle, int _b, int seed, double _th
     get_param(num_key, max_bucket, buf_c, file_offload);
     MPI_Barrier(MPI_COMM_WORLD);
 
-    
     hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b));
     if(!file_offload) {
-        total_hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b) * num_file);
+        total_hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b) * (num_file/size) * size);
     }
-
 
     for(int i=0; i<buf_c; i++) {
         buf[i]=(unsigned int*)malloc(sizeof(unsigned int) * num_hash * max_bucket);
@@ -200,6 +201,12 @@ double get_total_file_write_time_lsh() {return file_write_time;}
 
 static long long total_comm;
 
+void AllgatherHashResult(int rank, int size) {
+    if(file_offload) return;
+    // MPI_Barrier(MPI_COMMw);
+    MPI_Allgather(total_hash_result + MAX_LINE * (num_file/size) * rank * (num_hash+b),
+    MAX_LINE * (num_file/size) * (num_hash+b), MPI_INT, total_hash_result, MAX_LINE * (num_file/size) * (num_hash+b), MPI_INT, MPI_COMM_WORLD);
+}
 // Function to perform LSH (Locality Sensitive Hashing) and write results to a binary file
 void lsh_cuda(const std::string& filepath, const std::string& outputPath, int &_num_line, int file_idx) {
     int *bias;
@@ -507,7 +514,11 @@ void compare_lsh_cuda(const vector<string> &file_list, const std::string& output
                     inFile.read(reinterpret_cast<char*>(hash_result), sizeof(unsigned int) * fs * (num_hash+b));
                     inFile.close();
                 } else {
-                    hash_result=total_hash_result+MAX_LINE*(num_hash+b)*i;
+                    memcpy( 
+                        hash_result, 
+                        total_hash_result + MAX_LINE * (num_hash + b) * i, 
+                        sizeof(unsigned int) * fs * (num_hash + b)
+                    );
                 }
                 // Organize hash results into buckets based on the key
                 for(int j=0; j<fs; j++) {
@@ -522,6 +533,7 @@ void compare_lsh_cuda(const vector<string> &file_list, const std::string& output
                         // If the number of documents in a bucket exceeds max_bucket,  
                         // perform pairwise comparisons in chunks of max_bucket within that bucket.
                         if(cnt[tmp]==max_bucket) {
+                            printf("  bucket reset: %d %d %d\n", key, i, j);
                             int c=tmp;
                             gpuErrchk(cudaMemcpy(cuda_buf1, buf[c], sizeof(unsigned int)*cnt[c]*num_hash, cudaMemcpyHostToDevice));
 

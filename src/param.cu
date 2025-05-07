@@ -64,7 +64,8 @@ void set_param(const int num_file, int num_hash) {
         file_offload=true;
         if(!rank) printf("  File offload: True\n");
     }
-
+    
+    MPI_Bcast(&file_offload, 1, MPI_INT, 0, MPI_COMM_WORLD);
     // Calculate the number of keys based on file size and bucket size
     num_key = max(2*num_file*MAX_LINE / max_bucket, int(std::pow(num_file*MAX_LINE, 1.0/2)*2));
 

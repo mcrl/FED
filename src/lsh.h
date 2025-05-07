@@ -10,6 +10,7 @@ void print_cmp_time_lsh();
 void init_lsh_cuda(int _num_hash, int _len_shingle, int _b, int seed, double _th, int num_file);
 
 void lsh_cuda(const std::string& filepath, const std::string& outputPath, int &_num_line, int idx);
+void AllgatherHashResult(int rank, int size);
 void compare_lsh_cuda(const vector<string> &file_list, const std::string& outputPath, int num_file, int *file_size, int rank, int size);
 
 void merge_union(int rank, int size);
