@@ -42,7 +42,6 @@ void set_param(const int num_file, int num_hash) {
      // Compute the maximum bucket size based on available GPU memory
     max_bucket=sqrt(free_mem*0.9/ ((local_size-1)/deviceCount+1));
 
-
     // Check CPU memory and decide to use file offload
     struct sysinfo info;
     if (sysinfo(&info) != 0) {
@@ -50,14 +49,18 @@ void set_param(const int num_file, int num_hash) {
         printf("sysinfo error\n");
     }
 
+    long long tmp_index = (long long)num_file*MAX_LINE*num_hash;
+
     long cpu_free_mem = info.freeram * info.mem_unit;
     long cpu_required = sizeof(unsigned int) * num_file*MAX_LINE*num_hash*local_size;
-    if(!rank) {
-        printf("CPU Free memory: %.2f GB\n", cpu_free_mem / 1024.0 / 1024.0 / 1024.0);
-        printf("  minimum required memory: %.2f GB\n", cpu_required / 1024.0 / 1024.0 / 1024.0);
-    }
+    
+    // if(!rank) {
+    //     printf("CPU Free memory: %.2f GB\n", cpu_free_mem / 1024.0 / 1024.0 / 1024.0);
+    //     printf("  minimum required memory: %.2f GB\n", cpu_required / 1024.0 / 1024.0 / 1024.0);
+    // }
 
-    if(cpu_free_mem > 10 * cpu_required) {
+    // If the available CPU free memory is sufficient and the index of the hash result is smaller than INT_MAX, proceed without offloading.
+    if(cpu_free_mem > 10 * cpu_required && tmp_index < INT_MAX ) {
         file_offload=false;
         if(!rank) printf("  File offload: False\n");
     } else {

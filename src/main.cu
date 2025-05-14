@@ -36,10 +36,15 @@ int main(int argc, char* argv[]) {
     sort(file_list.begin(), file_list.end()); // Sort files alphabetically
 
     int num_file = file_list.size(); // Total number of files
-    int files_per_process = (num_file + size - 1) / size; // Files assigned per process
+    int files_per_process = num_file / size;    
+    int extra = num_file % size;               
 
-    int start_index = rank * files_per_process; // Start index for the process
-    int end_index = min(start_index + files_per_process, num_file); // End index for the process
+    int start_index = rank * files_per_process + std::min(rank, extra);  // Start index for the process
+    int end_index = start_index + files_per_process ; // End index for the process
+
+    if (rank < extra) end_index++;      
+    // Files assigned per process
+    files_per_process = end_index - start_index ;
 
     // Initialize parameters for LSH
     int num_hash = NUM_HASH;
@@ -48,7 +53,7 @@ int main(int argc, char* argv[]) {
     init_lsh_cuda(num_hash, shingle_len, b, 777984, 0.8, num_file); //num_hash, shingle_len, random_seed
     if(!rank) generate_file_init(outputPath);
 
-    int *file_size= (int*)malloc(sizeof(int) * files_per_process * size);
+    int *file_size= (int*)malloc(sizeof(int) * num_file);
 
     // Generate Minhash signature matrix and Calculate the bucket IDs of each band.
     if (rank == 0) {
@@ -56,15 +61,17 @@ int main(int argc, char* argv[]) {
     }
 
     auto time1 = std::chrono::high_resolution_clock::now();
+
     for (int i=start_index; i < end_index; i++) {
         const string &fp=file_list[i];
-        lsh_cuda(fp, outputPath, file_size[i], i);
+        lsh_cuda(fp, outputPath, file_size[i], i, num_file);
     }
 
-    // Gather file sizes from all processes
-    MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, file_size, files_per_process, MPI_INT, MPI_COMM_WORLD);
-    auto time2 = std::chrono::high_resolution_clock::now();
+    // Gather file sizes from all processes    
+    AllgatherFileSize(size, files_per_process, file_size);
 
+    auto time2 = std::chrono::high_resolution_clock::now();
+    
     std::chrono::duration<double> elapsed1 = time2 - time1;
     
     // Calculate time taken for MinHash
@@ -81,9 +88,11 @@ int main(int argc, char* argv[]) {
     if (rank == 0) {
         std::cout << "Start Comparison.." << std::endl;
     }
-    
-    AllgatherHashResult(rank,size);
-    
+
+    // (when file offloading is disabled) 
+    // Gathers the hash results from all processes into the total_hash_result array
+    AllgatherHashResult(rank, size, files_per_process, start_index);
+
     time1 = std::chrono::high_resolution_clock::now();
     compare_lsh_cuda(file_list, outputPath, num_file, file_size, rank, size);
     MPI_Barrier(MPI_COMM_WORLD);

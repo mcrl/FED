@@ -110,9 +110,9 @@ void init_lsh_cuda(int _num_hash, int _len_shingle, int _b, int seed, double _th
 
     hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b));
     if(!file_offload) {
-        total_hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b) * (num_file/size) * size);
+        total_hash_result= (unsigned int*)malloc(sizeof(unsigned int) * MAX_LINE * (num_hash+b) * num_file);
     }
-
+    MPI_Barrier(MPI_COMM_WORLD);
     for(int i=0; i<buf_c; i++) {
         buf[i]=(unsigned int*)malloc(sizeof(unsigned int) * num_hash * max_bucket);
         file_idx[i]=(int*)malloc(sizeof(int) * max_bucket);
@@ -201,14 +201,10 @@ double get_total_file_write_time_lsh() {return file_write_time;}
 
 static long long total_comm;
 
-void AllgatherHashResult(int rank, int size) {
-    if(file_offload) return;
-    // MPI_Barrier(MPI_COMMw);
-    MPI_Allgather(total_hash_result + MAX_LINE * (num_file/size) * rank * (num_hash+b),
-    MAX_LINE * (num_file/size) * (num_hash+b), MPI_INT, total_hash_result, MAX_LINE * (num_file/size) * (num_hash+b), MPI_INT, MPI_COMM_WORLD);
-}
+
 // Function to perform LSH (Locality Sensitive Hashing) and write results to a binary file
-void lsh_cuda(const std::string& filepath, const std::string& outputPath, int &_num_line, int file_idx) {
+void lsh_cuda(const std::string& filepath, const std::string& outputPath, int &_num_line, int file_idx, int num_file) {
+
     int *bias;
     char *buf;
     int num_line;
@@ -290,6 +286,72 @@ void lsh_cuda(const std::string& filepath, const std::string& outputPath, int &_
     _num_line=num_line;
     free(bias);
     free(buf);
+}
+
+// Gathers the file sizes from all processes into the file_size array
+void AllgatherFileSize(int size, int files_per_process, int *file_size) {
+
+    // Allocate memory for the send counts array to store the number of files per process
+    int *sendcounts = (int*)malloc(sizeof(int) * size);
+    
+    // Gather the number of files each process has
+    MPI_Allgather(&files_per_process, 1, MPI_INT, sendcounts, 1, MPI_INT, MPI_COMM_WORLD);
+
+    // Allocate memory for the displacement array to store the starting index of each process's data
+    int *displs = (int*)malloc(sizeof(int) * size);
+    displs[0] = 0;
+    // Calculate the displacement values based on the send counts
+    for (int i = 1; i < size; i++) {
+        displs[i] = displs[i - 1] + sendcounts[i - 1];
+    }
+    // Gather file sizes from all processes into the file_size array
+    MPI_Allgatherv(
+        MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,  
+        file_size, sendcounts, displs, MPI_INT,
+        MPI_COMM_WORLD
+    );
+    free(sendcounts);
+    free(displs);
+    }
+
+// Gathers the hash results from all processes into the total_hash_result array
+void AllgatherHashResult(int rank, int size, int files_per_process, int start_index) {
+    if(file_offload) return;
+    // Allocate memory for the send counts and displacement arrays
+    int *sendcounts = (int*)malloc(size * sizeof(int));
+    int *displs = (int*)malloc(size * sizeof(int));
+   
+    // Gather the number of files each process handles
+    MPI_Allgather(&files_per_process, 1, MPI_INT, sendcounts, 1, MPI_INT, MPI_COMM_WORLD);
+
+    // Calculate the data size each process will send (including hash data)
+    for (int i = 0; i < size; i++) {
+        sendcounts[i] = MAX_LINE * sendcounts[i] * (num_hash + b);
+    }
+
+    // Calculate the displacement for each process's data in the result buffer
+    displs[0] = 0;
+    for (int i = 1; i < size; i++) {
+        displs[i] = displs[i - 1] + sendcounts[i - 1];
+    }
+
+    // Gather the hash results from all processes into the total_hash_result array
+    MPI_Allgatherv(
+        total_hash_result + MAX_LINE * start_index * (num_hash + b),  
+        sendcounts[rank],                                            
+        MPI_INT,                                                     
+        total_hash_result,                                           
+        sendcounts,                                                 
+        displs,                                                     
+        MPI_INT,                                                    
+        MPI_COMM_WORLD                                              
+    );
+
+    // Free dynamically allocated memory
+    free(sendcounts);
+    free(displs);
+    MPI_Barrier(MPI_COMM_WORLD);  
+    
 }
 
 #define BLOCK_SIZE 32
@@ -485,7 +547,6 @@ void compare_lsh_cuda(const vector<string> &file_list, const std::string& output
 
     // Process buckets assigned to the current rank in parallel
     for(int b_id=rank; b_id<b; b_id+=size) {
-
         // Process keys in the range of 0 to num_key in chunks of C
         for(int key=0; key<num_key; key+=C) {
             auto time1 = std::chrono::high_resolution_clock::now();
@@ -519,21 +580,25 @@ void compare_lsh_cuda(const vector<string> &file_list, const std::string& output
                         total_hash_result + MAX_LINE * (num_hash + b) * i, 
                         sizeof(unsigned int) * fs * (num_hash + b)
                     );
+                    
                 }
+                
+
                 // Organize hash results into buckets based on the key
                 for(int j=0; j<fs; j++) {
                     auto tmp = *(hash_result + (unsigned long long)j*(num_hash+b) + num_hash + b_id) - key;
                     if(tmp < C) {
                         // Copy hash results for the current bucket into the buffer
                         memcpy(buf[tmp]+cnt[tmp]*num_hash, hash_result+(unsigned long long)j*(num_hash+b), sizeof(unsigned int)*num_hash);
+                        
                         file_idx[tmp][cnt[tmp]] = i;
                         line_idx[tmp][cnt[tmp]] = j;
                         cnt[tmp]++;
 
+                           
                         // If the number of documents in a bucket exceeds max_bucket,  
                         // perform pairwise comparisons in chunks of max_bucket within that bucket.
                         if(cnt[tmp]==max_bucket) {
-                            printf("  bucket reset: %d %d %d\n", key, i, j);
                             int c=tmp;
                             gpuErrchk(cudaMemcpy(cuda_buf1, buf[c], sizeof(unsigned int)*cnt[c]*num_hash, cudaMemcpyHostToDevice));
 
@@ -728,6 +793,7 @@ void generate_file_init(const std::string& outputPath) {
 }
 
 void delete_hash_result(const std::string& outputPath) {
+    if(!file_offload) return;
     std::filesystem::path outputDir(outputPath);
     for (const auto& entry : std::filesystem::directory_iterator(outputDir)) {
         if (entry.is_regular_file() && entry.path().extension() == ".bin") {
@@ -775,8 +841,8 @@ void finalize_lsh() {
     free(p); free(q); free(r);
     for(int i=0; i<C; i++) {
         free(buf[i]);
-        free(file_idx[i]);
-        free(line_idx[i]);
+        // free(file_idx[i]);
+        // free(line_idx[i]);
     }
     // Free allocated GPU memory
     cudaFree(bias_cuda);
