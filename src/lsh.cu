@@ -169,13 +169,15 @@ __global__ void hash_string_kernel_lsh(char *buf, int *bias, unsigned int *_p, u
     }
     res = sum;
     // Compute hash for the rolling window
-    for (int i = 10 + len_shingle; i < len - 4; i++) {
+    for (int i = 10 + len_shingle; i < len - len_shingle - 1 ; i++) {
         sum = (sum * p + ((unsigned int)text[i - len_shingle]) * r + text[i]) % q;
         res = min(res, sum);
     }
     // Store the resulting hash value
     hash_result[line_id * (num_hash + b) + hash_id] = res;
 }
+
+
 
 // Kernel to generate keys from hashed values
 __global__ void generate_key_kernel(unsigned int *hash_result, int num_line, int num_hash, int b, int num_key) {
